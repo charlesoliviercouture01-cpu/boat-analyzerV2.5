@@ -3,7 +3,8 @@ import pandas as pd
 import os
 from datetime import datetime
 
-app = Flask(__name__)
+# Flask servira automatiquement /static
+app = Flask(__name__, static_folder="static")
 
 # ================= CONFIG =================
 CFG = {
@@ -34,29 +35,31 @@ HTML = """
 <div class="d-flex justify-content-between align-items-center mb-4">
   <img src="{{ url_for('static', filename='precision_logo.png') }}"
        style="height:120px;" onerror="this.style.display='none'">
+
   <h1 class="text-center flex-grow-1">{{ etat_global }}</h1>
+
   <img src="{{ url_for('static', filename='image_copy.png') }}"
        style="height:120px;" onerror="this.style.display='none'">
 </div>
 
 <form method="post" action="/upload" enctype="multipart/form-data">
 
-<!-- DATE / HEURE / EMBARCATION -->
+<!-- INFOS COURSE -->
 <div class="row mb-2">
   <div class="col">
-    <input class="form-control" type="date" name="date_course" required>
+    <input class="form-control" type="date" name="date_test" required>
   </div>
   <div class="col">
-    <input class="form-control" type="time" name="heure_course" required>
+    <input class="form-control" type="time" name="heure_session" required>
   </div>
   <div class="col">
     <input class="form-control" name="num_embarcation"
-           placeholder="Numéro de l'embarcation" required>
+           placeholder="Numéro embarcation" required>
   </div>
 </div>
 
 <!-- TEMPÉRATURE -->
-<div class="row mb-2">
+<div class="row mb-3">
   <div class="col-md-4">
     <input class="form-control" type="number" step="0.1"
            name="ambient_temp"
@@ -64,10 +67,9 @@ HTML = """
   </div>
 </div>
 
-<!-- FICHIER -->
-<input class="form-control mb-2" type="file" name="file" required>
-
+<input class="form-control mb-3" type="file" name="file" required>
 <button class="btn btn-primary">Analyser</button>
+
 </form>
 
 {% if table %}
@@ -96,9 +98,10 @@ def analyze_dataframe(df, ambient_temp):
         if col not in df.columns:
             raise ValueError(f"Colonne manquante : {col}")
 
+    # Colonnes Lambda (auto-détection)
     lambda_cols = [c for c in df.columns if "lambda" in c.lower()]
     if not lambda_cols:
-        raise ValueError("Aucune colonne Lambda détectée dans le fichier")
+        raise ValueError("Aucune colonne Lambda détectée")
 
     df["Lambda"] = df[lambda_cols].mean(axis=1)
 
@@ -113,17 +116,17 @@ def analyze_dataframe(df, ambient_temp):
     df["dt"] = df["Time (s)"].diff().fillna(0)
 
     acc = 0.0
-    cheat = []
+    debut = []
 
     for out, dt in zip(df["OUT"], df["dt"]):
         if out:
             acc += dt
-            cheat.append(acc >= CFG["cheat_delay_sec"])
+            debut.append(acc >= CFG["cheat_delay_sec"])
         else:
             acc = 0.0
-            cheat.append(False)
+            debut.append(False)
 
-    df["Début_triche"] = cheat
+    df["Début_triche"] = debut
     df["QUALIFIÉ"] = ~df["OUT"].rolling(2).max().fillna(0).astype(bool)
 
     return df
@@ -141,13 +144,8 @@ def index():
 @app.route("/upload", methods=["POST"])
 def upload():
     try:
-        file = request.files["file"]
         ambient_temp = float(request.form["ambient_temp"])
-
-        # Infos course (stockées si besoin plus tard)
-        date_course = request.form["date_course"]
-        heure_course = request.form["heure_course"]
-        num_embarcation = request.form["num_embarcation"]
+        file = request.files["file"]
 
         df = pd.read_csv(file)
         df = analyze_dataframe(df, ambient_temp)
@@ -181,4 +179,5 @@ def download():
     fname = request.args.get("fname")
     return send_file(os.path.join(UPLOAD_DIR, fname), as_attachment=True)
 
-# ⚠️ PAS de app.run() pour Render
+# ⚠️ PAS de app.run() (Render s’en charge)
+
