@@ -3,10 +3,11 @@ import pandas as pd
 import os
 from datetime import datetime
 
-# Flask servira automatiquement /static
-app = Flask(__name__, static_folder="static")
+app = Flask(__name__)
 
-# ================= CONFIG =================
+UPLOAD_DIR = "/tmp"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
 CFG = {
     "tps_range": (90, 105),
     "lambda_range": (0.80, 0.92),
@@ -15,10 +16,6 @@ CFG = {
     "cheat_delay_sec": 0.5
 }
 
-UPLOAD_DIR = "/tmp"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-# ================= HTML =================
 HTML = """
 <!doctype html>
 <html lang="fr">
@@ -31,39 +28,24 @@ HTML = """
 <body class="p-4 bg-dark text-light">
 <div class="container">
 
-<!-- LOGOS -->
 <div class="d-flex justify-content-between align-items-center mb-4">
-  <img src="{{ url_for('static', filename='precision_logo.png') }}"
-       style="height:120px;" onerror="this.style.display='none'">
-
+  <img src="{{ url_for('static', filename='precision_logo.png') }}" height="120">
   <h1 class="text-center flex-grow-1">{{ etat_global }}</h1>
-
-  <img src="{{ url_for('static', filename='image_copy.png') }}"
-       style="height:120px;" onerror="this.style.display='none'">
+  <img src="{{ url_for('static', filename='image_copy.png') }}" height="120">
 </div>
 
 <form method="post" action="/upload" enctype="multipart/form-data">
 
-<!-- INFOS COURSE -->
 <div class="row mb-2">
-  <div class="col">
-    <input class="form-control" type="date" name="date_test" required>
-  </div>
-  <div class="col">
-    <input class="form-control" type="time" name="heure_session" required>
-  </div>
-  <div class="col">
-    <input class="form-control" name="num_embarcation"
-           placeholder="Numéro embarcation" required>
-  </div>
+  <div class="col"><input class="form-control" type="date" name="date" required></div>
+  <div class="col"><input class="form-control" type="time" name="heure" required></div>
+  <div class="col"><input class="form-control" name="numero" placeholder="Numéro embarcation" required></div>
 </div>
 
-<!-- TEMPÉRATURE -->
-<div class="row mb-3">
+<div class="row mb-2">
   <div class="col-md-4">
     <input class="form-control" type="number" step="0.1"
-           name="ambient_temp"
-           placeholder="Température ambiante (°C)" required>
+           name="ambient_temp" placeholder="Température ambiante (°C)" required>
   </div>
 </div>
 
@@ -83,37 +65,20 @@ HTML = """
 </html>
 """
 
-# ================= ANALYSE =================
 def analyze_dataframe(df, ambient_temp):
+    df = df.copy()
 
-    REQUIRED = [
-        "TPS (%)",
-        "Fuel Pressure (psi)",
-        "IAT (°C)",
-        "ECT (°C)",
-        "Time (s)"
-    ]
+    df["Lambda"] = df[["AFR", "AFR.1"]].mean(axis=1)
 
-    for col in REQUIRED:
-        if col not in df.columns:
-            raise ValueError(f"Colonne manquante : {col}")
-
-    # Colonnes Lambda (auto-détection)
-    lambda_cols = [c for c in df.columns if "lambda" in c.lower()]
-    if not lambda_cols:
-        raise ValueError("Aucune colonne Lambda détectée")
-
-    df["Lambda"] = df[lambda_cols].mean(axis=1)
-
-    df["TPS_OK"] = df["TPS (%)"].between(*CFG["tps_range"])
+    df["TPS_OK"] = df["%"].between(*CFG["tps_range"])
     df["Lambda_OK"] = df["Lambda"].between(*CFG["lambda_range"])
-    df["Fuel_OK"] = df["Fuel Pressure (psi)"].between(*CFG["fuel_range"])
-    df["IAT_OK"] = df["IAT (°C)"] <= ambient_temp + CFG["ambient_offset"]
-    df["ECT_OK"] = df["ECT (°C)"] <= ambient_temp + CFG["ambient_offset"]
+    df["Fuel_OK"] = df["psi.1"].between(*CFG["fuel_range"])
+    df["IAT_OK"] = df["°C"] <= ambient_temp + CFG["ambient_offset"]
+    df["ECT_OK"] = df["°C.1"] <= ambient_temp + CFG["ambient_offset"]
 
     df["OUT"] = ~(df["TPS_OK"] & df["Lambda_OK"] & df["Fuel_OK"] & df["IAT_OK"] & df["ECT_OK"])
 
-    df["dt"] = df["Time (s)"].diff().fillna(0)
+    df["dt"] = df["s"].diff().fillna(0)
 
     acc = 0.0
     debut = []
@@ -123,7 +88,7 @@ def analyze_dataframe(df, ambient_temp):
             acc += dt
             debut.append(acc >= CFG["cheat_delay_sec"])
         else:
-            acc = 0.0
+            acc = 0
             debut.append(False)
 
     df["Début_triche"] = debut
@@ -131,15 +96,9 @@ def analyze_dataframe(df, ambient_temp):
 
     return df
 
-# ================= ROUTES =================
 @app.route("/")
 def index():
-    return render_template_string(
-        HTML,
-        table=None,
-        download=None,
-        etat_global="Boat Data Analyzer"
-    )
+    return render_template_string(HTML, table=None, download=None, etat_global="Boat Data Analyzer")
 
 @app.route("/upload", methods=["POST"])
 def upload():
@@ -147,22 +106,19 @@ def upload():
         ambient_temp = float(request.form["ambient_temp"])
         file = request.files["file"]
 
-        df = pd.read_csv(file)
+        df = pd.read_csv(file, skiprows=20)
         df = analyze_dataframe(df, ambient_temp)
 
         rows = df[df["Début_triche"]]
         etat = "PASS"
         if not rows.empty:
-            etat = f"CHEAT – Début à {rows['Time (s)'].iloc[0]:.2f} s"
+            etat = f"CHEAT – Début à {rows['s'].iloc[0]:.2f} s"
 
         fname = f"result_{datetime.now().timestamp()}.csv"
         path = os.path.join(UPLOAD_DIR, fname)
         df.to_csv(path, index=False)
 
-        table = df.head(100).to_html(
-            classes="table table-dark table-striped",
-            index=False
-        )
+        table = df.head(100).to_html(classes="table table-dark table-striped", index=False)
 
         return render_template_string(
             HTML,
@@ -172,12 +128,14 @@ def upload():
         )
 
     except Exception as e:
-        return f"<h2>Internal Server Error</h2><pre>{e}</pre>", 500
+        return f"<h2>Erreur</h2><pre>{e}</pre>", 500
 
 @app.route("/download")
 def download():
     fname = request.args.get("fname")
     return send_file(os.path.join(UPLOAD_DIR, fname), as_attachment=True)
 
+
 # ⚠️ PAS de app.run() (Render s’en charge)
+
 
